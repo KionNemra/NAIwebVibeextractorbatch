@@ -479,8 +479,7 @@
         approxEqual(currentValue, target) &&
         (
           !changed ||      // 原来就等于目标值
-          isPending(card) || // 明确进入待提取
-          isDownloadReady(card) // 或已经直接变成可下载（说明目标值有缓存）
+          isPending(card) // 改值后必须进入待提取，避免误用旧缓存结果
         );
 
       if (committed) {
@@ -515,13 +514,9 @@
       return;
     }
 
-    if (changed && isDownloadReady(card)) {
-      throw new Error(`卡片 ${id} 改成 ${targetText} 后仍直接显示可下载，疑似仍是旧提取结果，已阻止错误下载`);
-    }
-
-    // 改值后如果既没 pending 也没 download，就视为没提交成功，不继续下载错文件
+    // 改值后必须是 pending；如果直接是 download，通常仍是旧缓存结果
     if (changed && !isPending(card)) {
-      throw new Error(`卡片 ${id} 改成 ${targetText} 后未进入待提取/可下载状态`);
+      throw new Error(`卡片 ${id} 改成 ${targetText} 后未进入待提取状态`);
     }
 
     for (let attempt = 1; attempt <= CONFIG.extractRetries; attempt++) {
