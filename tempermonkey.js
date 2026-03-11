@@ -224,19 +224,14 @@
       el = el.parentElement;
     }
 
-    const docScroller = document.scrollingElement || document.documentElement;
-    if (docScroller) {
-      candidates.push(docScroller);
+    // 优先在卡片祖先链里选滚动容器，避免被页面整体滚动条“抢走”。
+    if (candidates.length) {
+      // 嵌套 overflow 时，选择可滚动距离最大的祖先容器。
+      candidates.sort((a, b) => (b.scrollHeight - b.clientHeight) - (a.scrollHeight - a.clientHeight));
+      return candidates[0];
     }
 
-    if (!candidates.length) {
-      return docScroller || document.documentElement;
-    }
-
-    // 有些页面会嵌套多个 overflow 容器；选择“可滚动距离最大”的那个，
-    // 通常才是虚拟列表真正的滚动容器。
-    candidates.sort((a, b) => (b.scrollHeight - b.clientHeight) - (a.scrollHeight - a.clientHeight));
-    return candidates[0];
+    return document.scrollingElement || document.documentElement;
   }
 
   async function findVibeListContainer() {
