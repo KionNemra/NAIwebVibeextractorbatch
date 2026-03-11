@@ -100,6 +100,19 @@
     return Math.max(0.01, Math.min(1, Number(n)));
   }
 
+  function pickProbeValue(target, delta = 0.02) {
+    const up = clamp01(target + delta);
+    if (!isSameCommittedValue(up, target)) return up;
+    return clamp01(target - delta);
+  }
+
+  function pickBypassValue(target) {
+    // 对 0.01 这类极小值，直接切到中间值更容易打破“直接可下载旧缓存”状态。
+    if (target <= 0.05) return 0.35;
+    if (target >= 0.95) return 0.65;
+    return target < 0.5 ? 0.75 : 0.25;
+  }
+
   function approxEqual(a, b, eps = 0.011) {
     return Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) < eps;
   }
@@ -487,7 +500,7 @@
       await focusCard(card, list);
 
       // 抖一下再回目标，逼 React 内部状态刷新
-      const nudge = clamp01(target <= 0.98 ? target + 0.01 : target - 0.01);
+      const nudge = pickProbeValue(target, 0.05);
       const nudgeText = formatValue(nudge);
 
       await applyInfoValue(card, nudgeText);
@@ -549,14 +562,33 @@
     if (changed && isDownloadReady(card)) {
       log(`卡片 ${id} 的 ${targetText} 变更后直接可下载，执行二次改值校验以避免下载旧缓存`);
 
-      const probe = clamp01(target <= 0.98 ? target + 0.02 : target - 0.02);
+      const probe = pickProbeValue(target, target <= 0.05 ? 0.20 : 0.08);
       await forceCommitTarget(id, probe, target, list);
       card = await forceCommitTarget(id, target, probe, list);
 
-      // 这里必须保持严格：若改值后始终直接可下载，则无法证明下载的是“当前目标值”新结果。
-      // 继续下载会出现“文件名前缀是新值，但内容仍是旧值”的错配。
+      // 仍直接可下载时，先执行一次“中间值强制提取”来打破缓存路径（尤其针对 0.01）。
       if (isDownloadReady(card)) {
-        throw new Error(`卡片 ${id} 改成 ${targetText} 后始终直接可下载，无法确认是否为新提取结果，已阻止下载`);
+        const bypass = pickBypassValue(target);
+        log(`卡片 ${id} 的 ${targetText} 仍直接可下载，执行缓存绕过：${formatValue(bypass)} -> ${targetText}`);
+
+        card = await forceCommitTarget(id, bypass, target, list);
+        if (requiresExtraction(card)) {
+          await clickCardAction(id, list);
+          await waitForCardState(
+            id,
+            list,
+            (c) => isDownloadReady(c),
+            CONFIG.extractTimeoutMs,
+            `卡片 ${id} 缓存绕过提取超时`
+          );
+          await sleep(CONFIG.afterActionMs);
+        }
+
+        card = await forceCommitTarget(id, target, bypass, list);
+
+        if (isDownloadReady(card)) {
+          throw new Error(`卡片 ${id} 改成 ${targetText} 后仍直接可下载，缓存绕过后仍无法确认新结果，已阻止下载`);
+        }
       }
     }
 
