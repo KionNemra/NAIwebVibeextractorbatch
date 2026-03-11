@@ -24,6 +24,7 @@
     maxScanLoops: 400,
     setCommitRetries: 4,
     extractRetries: 2,
+    modeSettleTimeoutMs: 1800,
     continueOnError: true,
   };
 
@@ -540,6 +541,39 @@
   // -----------------------------
   // extract / download
   // -----------------------------
+
+  async function waitForModeSettleAfterCommit(id, target, list, timeoutMs = CONFIG.modeSettleTimeoutMs) {
+    const start = Date.now();
+    let lastMode = null;
+    let stableCount = 0;
+
+    while (Date.now() - start < timeoutMs) {
+      const card = await ensureCardVisible(id, list);
+      const valueNow = getCurrentInfo(card);
+      const mode = getActionMode(card);
+
+      // 只在目标值显示稳定时判断模式，避免读到虚拟列表切换的瞬时旧节点。
+      if (approxEqual(valueNow, target)) {
+        if (mode === 'extract') return card;
+        if (mode === lastMode) {
+          stableCount += 1;
+        } else {
+          lastMode = mode;
+          stableCount = 1;
+        }
+
+        // 连续多次稳定为 download，视为前端已结算到该状态。
+        if (mode === 'download' && stableCount >= 3) {
+          return card;
+        }
+      }
+
+      await sleep(CONFIG.pollMs);
+    }
+
+    return ensureCardVisible(id, list);
+  }
+
   async function clickCardAction(id, list) {
     const card = await ensureCardVisible(id, list);
     const btn = getActionButton(card);
@@ -559,12 +593,17 @@
       return;
     }
 
+    if (changed) {
+      card = await waitForModeSettleAfterCommit(id, target, list);
+    }
+
     if (changed && isDownloadReady(card)) {
       log(`卡片 ${id} 的 ${targetText} 变更后直接可下载，执行二次改值校验以避免下载旧缓存`);
 
       const probe = pickProbeValue(target, target <= 0.05 ? 0.20 : 0.08);
       await forceCommitTarget(id, probe, target, list);
       card = await forceCommitTarget(id, target, probe, list);
+      card = await waitForModeSettleAfterCommit(id, target, list);
 
       // 仍直接可下载时，先执行一次“中间值强制提取”来打破缓存路径（尤其针对 0.01）。
       if (isDownloadReady(card)) {
@@ -585,6 +624,7 @@
         }
 
         card = await forceCommitTarget(id, target, bypass, list);
+        card = await waitForModeSettleAfterCommit(id, target, list);
 
         if (isDownloadReady(card)) {
           throw new Error(`卡片 ${id} 改成 ${targetText} 后仍直接可下载，缓存绕过后仍无法确认新结果，已阻止下载`);
