@@ -211,15 +211,26 @@
   }
 
   function findScrollParent(startEl) {
+    const candidates = [];
+
     let el = startEl;
     while (el && el !== document.body) {
       const style = getComputedStyle(el);
       const overflowY = style.overflowY;
-      if ((overflowY === 'auto' || overflowY === 'scroll') && el.scrollHeight > el.clientHeight + 40) {
-        return el;
+      const canScroll = (overflowY === 'auto' || overflowY === 'scroll') && el.scrollHeight > el.clientHeight + 40;
+      if (canScroll) {
+        candidates.push(el);
       }
       el = el.parentElement;
     }
+
+    // 优先在卡片祖先链里选滚动容器，避免被页面整体滚动条“抢走”。
+    if (candidates.length) {
+      // 嵌套 overflow 时，选择可滚动距离最大的祖先容器。
+      candidates.sort((a, b) => (b.scrollHeight - b.clientHeight) - (a.scrollHeight - a.clientHeight));
+      return candidates[0];
+    }
+
     return document.scrollingElement || document.documentElement;
   }
 
