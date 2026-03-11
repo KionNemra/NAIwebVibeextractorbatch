@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Vibe Batch Commit-Strict
 // @namespace    local.nai.vibe.batch.commitstrict
-// @version      1.0.5
+// @version      1.0.7
 // @description  Strict per-card vibe extraction/downloading with commit verification for long virtualized lists
 // @match        https://novelai.net/*
 // @grant        none
@@ -44,23 +44,33 @@
   // -----------------------------
   // download filename prefix
   // -----------------------------
+  function renameDownloadAnchor(anchor) {
+    if (!pendingDownloadPrefix || !anchor || !anchor.hasAttribute('download')) return;
+    try {
+      const oldName = anchor.getAttribute('download') || '';
+      const prefix = String(pendingDownloadPrefix).replace(/[^a-zA-Z0-9._-]/g, '');
+      if (oldName && prefix && !oldName.startsWith(prefix + '_')) {
+        anchor.setAttribute('download', `${prefix}_${oldName}`);
+      }
+    } catch (err) {
+      console.warn('[NAI CommitStrict] rename hook failed', err);
+    }
+  }
+
   (function patchAnchorDownloadName() {
     try {
+      // 拦截 anchor.click() — 最常见的编程式下载触发方式。
       const originalClick = HTMLAnchorElement.prototype.click;
       HTMLAnchorElement.prototype.click = function (...args) {
-        try {
-          if (pendingDownloadPrefix && this.hasAttribute('download')) {
-            const oldName = this.getAttribute('download') || '';
-            const prefix = String(pendingDownloadPrefix).replace(/[^a-zA-Z0-9._-]/g, '');
-            if (oldName && prefix && !oldName.startsWith(prefix + '_')) {
-              this.setAttribute('download', `${prefix}_${oldName}`);
-            }
-          }
-        } catch (err) {
-          console.warn('[NAI CommitStrict] rename hook failed', err);
-        }
+        renameDownloadAnchor(this);
         return originalClick.apply(this, args);
       };
+
+      // 兜底：捕获阶段监听 click 事件，拦截通过 dispatchEvent 触发的下载。
+      document.addEventListener('click', (e) => {
+        const target = e.target?.closest?.('a[download]');
+        if (target) renameDownloadAnchor(target);
+      }, true);
     } catch (err) {
       console.warn('[NAI CommitStrict] anchor patch failed', err);
     }
@@ -476,36 +486,28 @@
     if (!btn) return 'unknown';
 
     const txt = textOf(btn);
-
-    // 按钮含有下载图标（SVG path 中的 download 箭头）时直接判定为 download。
     const hasSvg = btn.querySelector('svg') !== null;
 
-    // During React remount the button text may be empty or only whitespace;
-    // 若有 SVG 图标但无文字，多半是下载按钮（图标按钮）。
+    // React remount 时文本可能为空。
     if (!txt) {
       return hasSvg ? 'download' : 'unknown';
     }
 
+    // 明确含 "anlas" → 提取按钮。
     if (/anlas/i.test(txt)) return 'extract';
-    if (/\d/.test(txt) && txt.length <= 12) return 'extract';
+
+    // 按钮含 SVG 图标 → 优先判定为下载（提取按钮通常只有文字/数字，无图标）。
+    if (hasSvg) return 'download';
+
+    // 纯数字文本（如 "5"、"10"、"0"）→ Anlas 费用，视为提取。
+    // 注意：只匹配纯数字，不匹配含字母/混合文本（如 "Download"、"2.5MB"）。
+    if (/^\d+$/.test(txt.trim())) return 'extract';
 
     return 'download';
   }
 
   function isDownloadReady(card) {
-    const mode = getActionMode(card);
-    if (mode === 'download') return true;
-
-    // 兜底：如果按钮含 SVG 图标且不含 "Encoding required" 提示，
-    // 视为下载就绪（有些语言环境下按钮文本可能含数字但实为下载）。
-    const btn = getActionButton(card);
-    if (btn && btn.querySelector('svg') && !isPending(card)) {
-      const txt = textOf(btn);
-      // 排除明确的 anlas 提取按钮
-      if (!/anlas/i.test(txt)) return true;
-    }
-
-    return false;
+    return getActionMode(card) === 'download';
   }
 
   function getCardFocusTarget(card) {
@@ -689,7 +691,7 @@
   }
 
   async function clickCardAction(id, list, options = {}) {
-    const { aggressive = false } = options;
+    const { aggressive = false, forDownload = false } = options;
     const card = await ensureCardVisible(id, list);
     const btn = getActionButton(card);
     if (!btn) throw new Error(`卡片 ${id} 找不到主动作按钮`);
@@ -697,15 +699,22 @@
     await focusCard(card, list);
 
     if (aggressive) {
-      // 提取动作允许更激进的双重触发，规避偶发“看得到按钮但点击不生效”。
+      // 提取动作允许更激进的双重触发，规避偶发”看得到按钮但点击不生效”。
       fireRealClick(btn);
       await sleep(40);
       clickElementAtCenter(btn);
       return;
     }
 
-    // 非激进模式：仍使用完整事件分发（fireRealClick），保证 React 合成事件能响应。
-    // 相比 aggressive 模式，此处只触发一次，避免重复导出同名文件。
+    if (forDownload) {
+      // 下载动作只触发一次 click 事件，且使用原生 .click()，
+      // 确保内部创建的 <a download> 走 HTMLAnchorElement.prototype.click 路径，
+      // 从而被文件名重命名补丁拦截。
+      btn.click();
+      return;
+    }
+
+    // 提取动作使用完整事件分发，保证 React 合成事件能响应。
     fireRealClick(btn);
   }
 
@@ -804,10 +813,23 @@
       await clickCardAction(id, list, { aggressive: CONFIG.aggressiveExtractClick });
 
       try {
+        let diagTimer = 0;
         await waitForCardState(
           id,
           list,
-          (c) => isDownloadReady(c),
+          (c) => {
+            const ready = isDownloadReady(c);
+            // 每 ~5 秒输出一次诊断日志，便于排查卡住原因。
+            diagTimer += 1;
+            if (!ready && diagTimer % 20 === 0) {
+              const btn = getActionButton(c);
+              const btnTxt = textOf(btn);
+              const mode = getActionMode(c);
+              const hasSvg = btn?.querySelector('svg') !== null;
+              log(`[诊断] ${id} 等待中：mode=${mode}, btnText="${btnTxt}", hasSvg=${hasSvg}`);
+            }
+            return ready;
+          },
           CONFIG.extractTimeoutMs,
           `卡片 ${id} 等待提取完成超时`
         );
@@ -836,7 +858,7 @@
 
     pendingDownloadPrefix = `${prefix}_${id}`;
     try {
-      await clickCardAction(id, list);
+      await clickCardAction(id, list, { forDownload: true });
       await sleep(CONFIG.afterActionMs);
     } finally {
       pendingDownloadPrefix = '';
