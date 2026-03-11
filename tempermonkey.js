@@ -547,8 +547,15 @@
     }
 
     if (changed && isDownloadReady(card)) {
-      log(`卡片 ${id} 的 ${targetText} 变更后已直接可下载（可能命中历史缓存），跳过提取`);
-      return;
+      log(`卡片 ${id} 的 ${targetText} 变更后直接可下载，执行二次改值校验以避免下载旧缓存`);
+
+      const probe = clamp01(target <= 0.98 ? target + 0.02 : target - 0.02);
+      await forceCommitTarget(id, probe, target, list);
+      card = await forceCommitTarget(id, target, probe, list);
+
+      if (isDownloadReady(card)) {
+        throw new Error(`卡片 ${id} 改成 ${targetText} 后始终直接可下载，无法确认是否为新提取结果，已阻止下载`);
+      }
     }
 
     // 改值后必须是 pending
