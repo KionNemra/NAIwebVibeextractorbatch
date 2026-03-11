@@ -104,6 +104,16 @@
     return Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) < eps;
   }
 
+  function isSameCommittedValue(a, b, eps = 0.0005) {
+    return Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) <= eps;
+  }
+
+  function hasMeaningfulChange(oldValue, target) {
+    // 旧值不可读时按“已变化”处理，避免在瞬时读值失败时错误复用旧下载结果。
+    if (!Number.isFinite(oldValue)) return true;
+    return !isSameCommittedValue(oldValue, target);
+  }
+
   function parseValues(raw) {
     return String(raw)
       .split(/[,\s]+/)
@@ -332,7 +342,7 @@
 
   function getCurrentInfo(card) {
     const { number, range } = getInfoControls(card);
-    const raw = number?.value ?? range?.value;
+    const raw = number?.value ?? range?.value ?? number?.getAttribute('value') ?? range?.getAttribute('value');
     const n = Number(raw);
     return Number.isFinite(n) ? n : NaN;
   }
@@ -486,7 +496,7 @@
       await sleep(300);
 
       const currentValue = getCurrentInfo(card);
-      const changed = !approxEqual(oldValue, target);
+      const changed = hasMeaningfulChange(oldValue, target);
 
       const committed =
         approxEqual(currentValue, target) &&
@@ -520,7 +530,7 @@
   async function extractIfNeeded(id, target, oldValue, list) {
     const targetText = formatValue(target);
     let card = await ensureCardVisible(id, list);
-    const changed = !approxEqual(oldValue, target);
+    const changed = hasMeaningfulChange(oldValue, target);
 
     if (!changed && isDownloadReady(card)) {
       log(`卡片 ${id} 的 ${targetText} 已可下载`);
