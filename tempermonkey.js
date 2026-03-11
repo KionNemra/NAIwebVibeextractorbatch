@@ -337,8 +337,21 @@
     return Number.isFinite(n) ? n : NaN;
   }
 
+  function hasVisibleText(root, needle) {
+    if (!root || !needle) return false;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      const txt = (node.nodeValue || '').trim();
+      if (!txt || !txt.includes(needle)) continue;
+      const parent = node.parentElement;
+      if (parent && isVisible(parent)) return true;
+    }
+    return false;
+  }
+
   function isPending(card) {
-    return textOf(card).includes('Encoding required');
+    return hasVisibleText(card, 'Encoding required');
   }
 
   function getHeaderButtons(card) {
@@ -514,7 +527,11 @@
       return;
     }
 
-    // 改值后必须是 pending；如果直接是 download，通常仍是旧缓存结果
+    if (changed && isDownloadReady(card)) {
+      throw new Error(`卡片 ${id} 改成 ${targetText} 后仍直接显示可下载，疑似仍是旧提取结果，已阻止错误下载`);
+    }
+
+    // 改值后必须是 pending
     if (changed && !isPending(card)) {
       throw new Error(`卡片 ${id} 改成 ${targetText} 后未进入待提取状态`);
     }
