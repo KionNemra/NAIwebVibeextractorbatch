@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Vibe Batch Commit-Strict
 // @namespace    local.nai.vibe.batch.commitstrict
-// @version      1.0.8
+// @version      1.0.9
 // @description  Strict per-card vibe extraction/downloading with commit verification for long virtualized lists
 // @match        https://novelai.net/*
 // @grant        none
@@ -182,7 +182,8 @@
   function fireRealClick(el) {
     if (!el) return;
     el.focus?.();
-    el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+    const Ptr = typeof PointerEvent !== 'undefined' ? PointerEvent : MouseEvent;
+    el.dispatchEvent(new Ptr('pointerdown', { bubbles: true }));
     el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
     el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
     // 单次 click 即可触发 React 事件委托（React 在 root 监听原生 click）。
@@ -714,10 +715,17 @@
     await focusCard(card, list);
 
     if (aggressive) {
-      // 激进模式：先尝试按钮中心点击（绕过层叠遮挡），若失败再 fireRealClick。
-      // 两步之间 40ms 间隔，但只触发一次有效 click（clickElementAtCenter
-      // 可能命中非按钮元素时 fireRealClick 兜底）。
-      clickElementAtCenter(btn);
+      // 激进模式：先尝试中心点击（绕过层叠遮挡），若 elementFromPoint
+      // 未命中按钮自身或其子元素，则回退到直接 fireRealClick。
+      const rect = btn.getBoundingClientRect();
+      const cx = rect.left + rect.width / 2;
+      const cy = rect.top + rect.height / 2;
+      const topEl = document.elementFromPoint(cx, cy);
+      if (topEl && btn.contains(topEl)) {
+        fireRealClick(topEl);
+      } else {
+        fireRealClick(btn);
+      }
       return;
     }
 
