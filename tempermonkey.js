@@ -234,6 +234,40 @@
     return Array.from(getVisibleCardMap(), ([id, card]) => ({ id, card }));
   }
 
+  function getCardId(card) {
+    const idInput = card?.querySelector('input[type="text"]');
+    return (idInput?.value || '').trim();
+  }
+
+  async function waitCardBindingStable(id, list, initialCard, timeoutMs = 1600) {
+    const start = Date.now();
+    let card = initialCard;
+    let stableHits = 0;
+
+    while (Date.now() - start < timeoutMs) {
+      const mapped = getVisibleCardMap().get(id) || null;
+      if (mapped && mapped !== card) {
+        card = mapped;
+        stableHits = 0;
+      }
+
+      const { number, range } = getInfoControls(card || null);
+      const idOk = card && isVisible(card) && getCardId(card) === id;
+      const controlsOk = Boolean(number && range);
+
+      if (idOk && controlsOk) {
+        stableHits += 1;
+        if (stableHits >= 2) return card;
+      } else {
+        stableHits = 0;
+      }
+
+      await sleep(CONFIG.pollMs);
+    }
+
+    throw new Error(`卡片 ${id} 在滚动后未稳定挂载`);
+  }
+
   function findScrollParent(startEl) {
     const candidates = [];
 
@@ -301,7 +335,7 @@
     const tryVisible = () => getVisibleCardMap().get(id) || null;
 
     let card = tryVisible();
-    if (card) return card;
+    if (card) return waitCardBindingStable(id, list, card);
 
     const originalTop = list.scrollTop;
     list.scrollTop = 0;
@@ -309,7 +343,7 @@
 
     for (let i = 0; i < CONFIG.maxScanLoops; i++) {
       card = tryVisible();
-      if (card) return card;
+      if (card) return waitCardBindingStable(id, list, card);
 
       const atBottom = list.scrollTop + list.clientHeight >= list.scrollHeight - 4;
       if (atBottom) break;
