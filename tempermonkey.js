@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Vibe Batch Commit-Strict
 // @namespace    local.nai.vibe.batch.commitstrict
-// @version      1.0.5
+// @version      1.0.6
 // @description  Strict per-card vibe extraction/downloading with commit verification for long virtualized lists
 // @match        https://novelai.net/*
 // @grant        none
@@ -44,23 +44,33 @@
   // -----------------------------
   // download filename prefix
   // -----------------------------
+  function renameDownloadAnchor(anchor) {
+    if (!pendingDownloadPrefix || !anchor || !anchor.hasAttribute('download')) return;
+    try {
+      const oldName = anchor.getAttribute('download') || '';
+      const prefix = String(pendingDownloadPrefix).replace(/[^a-zA-Z0-9._-]/g, '');
+      if (oldName && prefix && !oldName.startsWith(prefix + '_')) {
+        anchor.setAttribute('download', `${prefix}_${oldName}`);
+      }
+    } catch (err) {
+      console.warn('[NAI CommitStrict] rename hook failed', err);
+    }
+  }
+
   (function patchAnchorDownloadName() {
     try {
+      // 拦截 anchor.click() — 最常见的编程式下载触发方式。
       const originalClick = HTMLAnchorElement.prototype.click;
       HTMLAnchorElement.prototype.click = function (...args) {
-        try {
-          if (pendingDownloadPrefix && this.hasAttribute('download')) {
-            const oldName = this.getAttribute('download') || '';
-            const prefix = String(pendingDownloadPrefix).replace(/[^a-zA-Z0-9._-]/g, '');
-            if (oldName && prefix && !oldName.startsWith(prefix + '_')) {
-              this.setAttribute('download', `${prefix}_${oldName}`);
-            }
-          }
-        } catch (err) {
-          console.warn('[NAI CommitStrict] rename hook failed', err);
-        }
+        renameDownloadAnchor(this);
         return originalClick.apply(this, args);
       };
+
+      // 兜底：捕获阶段监听 click 事件，拦截通过 dispatchEvent 触发的下载。
+      document.addEventListener('click', (e) => {
+        const target = e.target?.closest?.('a[download]');
+        if (target) renameDownloadAnchor(target);
+      }, true);
     } catch (err) {
       console.warn('[NAI CommitStrict] anchor patch failed', err);
     }
@@ -689,7 +699,7 @@
   }
 
   async function clickCardAction(id, list, options = {}) {
-    const { aggressive = false } = options;
+    const { aggressive = false, forDownload = false } = options;
     const card = await ensureCardVisible(id, list);
     const btn = getActionButton(card);
     if (!btn) throw new Error(`卡片 ${id} 找不到主动作按钮`);
@@ -697,15 +707,22 @@
     await focusCard(card, list);
 
     if (aggressive) {
-      // 提取动作允许更激进的双重触发，规避偶发“看得到按钮但点击不生效”。
+      // 提取动作允许更激进的双重触发，规避偶发”看得到按钮但点击不生效”。
       fireRealClick(btn);
       await sleep(40);
       clickElementAtCenter(btn);
       return;
     }
 
-    // 非激进模式：仍使用完整事件分发（fireRealClick），保证 React 合成事件能响应。
-    // 相比 aggressive 模式，此处只触发一次，避免重复导出同名文件。
+    if (forDownload) {
+      // 下载动作只触发一次 click 事件，且使用原生 .click()，
+      // 确保内部创建的 <a download> 走 HTMLAnchorElement.prototype.click 路径，
+      // 从而被文件名重命名补丁拦截。
+      btn.click();
+      return;
+    }
+
+    // 提取动作使用完整事件分发，保证 React 合成事件能响应。
     fireRealClick(btn);
   }
 
@@ -836,7 +853,7 @@
 
     pendingDownloadPrefix = `${prefix}_${id}`;
     try {
-      await clickCardAction(id, list);
+      await clickCardAction(id, list, { forDownload: true });
       await sleep(CONFIG.afterActionMs);
     } finally {
       pendingDownloadPrefix = '';
