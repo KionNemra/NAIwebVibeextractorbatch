@@ -109,7 +109,8 @@
   }
 
   function hasMeaningfulChange(oldValue, target) {
-    if (!Number.isFinite(oldValue)) return false;
+    // 旧值不可读时按“已变化”处理，避免在瞬时读值失败时错误复用旧下载结果。
+    if (!Number.isFinite(oldValue)) return true;
     return !isSameCommittedValue(oldValue, target);
   }
 
@@ -500,7 +501,7 @@
       const committed =
         approxEqual(currentValue, target) &&
         (
-          !changed ||      // 原来就等于目标值，或旧值不可读
+          !changed ||      // 原来就等于目标值
           isPending(card) // 改值后必须进入待提取，避免误用旧缓存结果
         );
 
