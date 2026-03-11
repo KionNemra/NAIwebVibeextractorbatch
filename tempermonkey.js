@@ -24,6 +24,7 @@
     maxScanLoops: 400,
     setCommitRetries: 4,
     extractRetries: 2,
+    modeSettleTimeoutMs: 1800,
     continueOnError: true,
   };
 
@@ -98,6 +99,19 @@
 
   function clamp01(n) {
     return Math.max(0.01, Math.min(1, Number(n)));
+  }
+
+  function pickProbeValue(target, delta = 0.02) {
+    const up = clamp01(target + delta);
+    if (!isSameCommittedValue(up, target)) return up;
+    return clamp01(target - delta);
+  }
+
+  function pickBypassValue(target) {
+    // 对 0.01 这类极小值，直接切到中间值更容易打破“直接可下载旧缓存”状态。
+    if (target <= 0.05) return 0.35;
+    if (target >= 0.95) return 0.65;
+    return target < 0.5 ? 0.75 : 0.25;
   }
 
   function approxEqual(a, b, eps = 0.011) {
@@ -220,6 +234,40 @@
     return Array.from(getVisibleCardMap(), ([id, card]) => ({ id, card }));
   }
 
+  function getCardId(card) {
+    const idInput = card?.querySelector('input[type="text"]');
+    return (idInput?.value || '').trim();
+  }
+
+  async function waitCardBindingStable(id, list, initialCard, timeoutMs = 1600) {
+    const start = Date.now();
+    let card = initialCard;
+    let stableHits = 0;
+
+    while (Date.now() - start < timeoutMs) {
+      const mapped = getVisibleCardMap().get(id) || null;
+      if (mapped && mapped !== card) {
+        card = mapped;
+        stableHits = 0;
+      }
+
+      const { number, range } = getInfoControls(card || null);
+      const idOk = card && isVisible(card) && getCardId(card) === id;
+      const controlsOk = Boolean(number && range);
+
+      if (idOk && controlsOk) {
+        stableHits += 1;
+        if (stableHits >= 2) return card;
+      } else {
+        stableHits = 0;
+      }
+
+      await sleep(CONFIG.pollMs);
+    }
+
+    throw new Error(`卡片 ${id} 在滚动后未稳定挂载`);
+  }
+
   function findScrollParent(startEl) {
     const candidates = [];
 
@@ -287,7 +335,7 @@
     const tryVisible = () => getVisibleCardMap().get(id) || null;
 
     let card = tryVisible();
-    if (card) return card;
+    if (card) return waitCardBindingStable(id, list, card);
 
     const originalTop = list.scrollTop;
     list.scrollTop = 0;
@@ -295,7 +343,7 @@
 
     for (let i = 0; i < CONFIG.maxScanLoops; i++) {
       card = tryVisible();
-      if (card) return card;
+      if (card) return waitCardBindingStable(id, list, card);
 
       const atBottom = list.scrollTop + list.clientHeight >= list.scrollHeight - 4;
       if (atBottom) break;
@@ -487,7 +535,7 @@
       await focusCard(card, list);
 
       // 抖一下再回目标，逼 React 内部状态刷新
-      const nudge = clamp01(target <= 0.98 ? target + 0.01 : target - 0.01);
+      const nudge = pickProbeValue(target, 0.05);
       const nudgeText = formatValue(nudge);
 
       await applyInfoValue(card, nudgeText);
@@ -527,6 +575,39 @@
   // -----------------------------
   // extract / download
   // -----------------------------
+
+  async function waitForModeSettleAfterCommit(id, target, list, timeoutMs = CONFIG.modeSettleTimeoutMs) {
+    const start = Date.now();
+    let lastMode = null;
+    let stableCount = 0;
+
+    while (Date.now() - start < timeoutMs) {
+      const card = await ensureCardVisible(id, list);
+      const valueNow = getCurrentInfo(card);
+      const mode = getActionMode(card);
+
+      // 只在目标值显示稳定时判断模式，避免读到虚拟列表切换的瞬时旧节点。
+      if (approxEqual(valueNow, target)) {
+        if (mode === 'extract') return card;
+        if (mode === lastMode) {
+          stableCount += 1;
+        } else {
+          lastMode = mode;
+          stableCount = 1;
+        }
+
+        // 连续多次稳定为 download，视为前端已结算到该状态。
+        if (mode === 'download' && stableCount >= 3) {
+          return card;
+        }
+      }
+
+      await sleep(CONFIG.pollMs);
+    }
+
+    return ensureCardVisible(id, list);
+  }
+
   async function clickCardAction(id, list) {
     const card = await ensureCardVisible(id, list);
     const btn = getActionButton(card);
@@ -546,15 +627,42 @@
       return;
     }
 
+    if (changed) {
+      card = await waitForModeSettleAfterCommit(id, target, list);
+    }
+
     if (changed && isDownloadReady(card)) {
       log(`卡片 ${id} 的 ${targetText} 变更后直接可下载，执行二次改值校验以避免下载旧缓存`);
 
-      const probe = clamp01(target <= 0.98 ? target + 0.02 : target - 0.02);
+      const probe = pickProbeValue(target, target <= 0.05 ? 0.20 : 0.08);
       await forceCommitTarget(id, probe, target, list);
       card = await forceCommitTarget(id, target, probe, list);
+      card = await waitForModeSettleAfterCommit(id, target, list);
 
+      // 仍直接可下载时，先执行一次“中间值强制提取”来打破缓存路径（尤其针对 0.01）。
       if (isDownloadReady(card)) {
-        throw new Error(`卡片 ${id} 改成 ${targetText} 后始终直接可下载，无法确认是否为新提取结果，已阻止下载`);
+        const bypass = pickBypassValue(target);
+        log(`卡片 ${id} 的 ${targetText} 仍直接可下载，执行缓存绕过：${formatValue(bypass)} -> ${targetText}`);
+
+        card = await forceCommitTarget(id, bypass, target, list);
+        if (requiresExtraction(card)) {
+          await clickCardAction(id, list);
+          await waitForCardState(
+            id,
+            list,
+            (c) => isDownloadReady(c),
+            CONFIG.extractTimeoutMs,
+            `卡片 ${id} 缓存绕过提取超时`
+          );
+          await sleep(CONFIG.afterActionMs);
+        }
+
+        card = await forceCommitTarget(id, target, bypass, list);
+        card = await waitForModeSettleAfterCommit(id, target, list);
+
+        if (isDownloadReady(card)) {
+          throw new Error(`卡片 ${id} 改成 ${targetText} 后仍直接可下载，缓存绕过后仍无法确认新结果，已阻止下载`);
+        }
       }
     }
 
