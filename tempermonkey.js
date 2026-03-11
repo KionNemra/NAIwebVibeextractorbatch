@@ -508,7 +508,10 @@
         approxEqual(currentValue, target) &&
         (
           !changed ||      // 原来就等于目标值
-          requiresExtraction(card) // 改值后必须进入待提取/提取模式，避免误用旧缓存结果
+          requiresExtraction(card) ||
+          // 某些卡片在目标值存在历史提取缓存时会直接回到可下载。
+          // 只要这次已经成功“抖值->目标值”并读到目标值，就视为网页已接受。
+          isDownloadReady(card)
         );
 
       if (committed) {
@@ -544,7 +547,15 @@
     }
 
     if (changed && isDownloadReady(card)) {
-      throw new Error(`卡片 ${id} 改成 ${targetText} 后仍直接显示可下载，疑似仍是旧提取结果，已阻止错误下载`);
+      log(`卡片 ${id} 的 ${targetText} 变更后直接可下载，执行二次改值校验以避免下载旧缓存`);
+
+      const probe = clamp01(target <= 0.98 ? target + 0.02 : target - 0.02);
+      await forceCommitTarget(id, probe, target, list);
+      card = await forceCommitTarget(id, target, probe, list);
+
+      if (isDownloadReady(card)) {
+        throw new Error(`卡片 ${id} 改成 ${targetText} 后始终直接可下载，无法确认是否为新提取结果，已阻止下载`);
+      }
     }
 
     // 改值后必须是 pending
