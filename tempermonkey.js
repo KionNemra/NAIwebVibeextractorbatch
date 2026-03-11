@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Vibe Batch Commit-Strict
 // @namespace    local.nai.vibe.batch.commitstrict
-// @version      1.0.7
+// @version      1.0.10
 // @description  Strict per-card vibe extraction/downloading with commit verification for long virtualized lists
 // @match        https://novelai.net/*
 // @grant        none
@@ -182,12 +182,14 @@
   function fireRealClick(el) {
     if (!el) return;
     el.focus?.();
-    el.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
+    const Ptr = typeof PointerEvent !== 'undefined' ? PointerEvent : MouseEvent;
+    el.dispatchEvent(new Ptr('pointerdown', { bubbles: true }));
     el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
     el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    // 单次 click 即可触发 React 事件委托（React 在 root 监听原生 click）。
+    // 注意：不再追加 el.click()，因为会导致 React handler 双重触发，
+    // 从而引起提取按钮连按两次、下载双重触发等严重问题。
     el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-    // 某些 React/MUI 按钮只在原生 click 路径上触发处理器，补打一遍。
-    el.click?.();
   }
 
   function clickElementAtCenter(el) {
@@ -470,15 +472,57 @@
   }
 
   function getHeaderButtons(card) {
-    const header = card?.firstElementChild;
-    if (!header) return [];
-    return Array.from(header.querySelectorAll('button')).filter(isVisible);
+    if (!card) return [];
+
+    // 策略 1：传统位置——firstElementChild 通常是 header/toolbar。
+    const first = card.firstElementChild;
+    if (first) {
+      const btns = Array.from(first.querySelectorAll('button')).filter(isVisible);
+      if (btns.length >= 2) return btns;
+    }
+
+    // 策略 2：遍历 card 所有直接子元素，找含有最多可见 button 的那个区域。
+    // 典型 header/toolbar 比其他区域（滑条、缩略图）拥有更多按钮。
+    let best = [];
+    for (const child of card.children) {
+      if (child === first) continue; // 已检查
+      const btns = Array.from(child.querySelectorAll('button')).filter(isVisible);
+      if (btns.length > best.length) best = btns;
+    }
+    if (best.length >= 2) return best;
+
+    // 策略 3：整张卡片范围搜索（最后手段）。
+    return Array.from(card.querySelectorAll('button')).filter(isVisible);
   }
 
-  // header buttons usually [trash, action, check]
+  // header buttons usually [trash, action, check].
+  // 但按钮数量/顺序在提取进行中可能变化，因此加内容兜底。
   function getActionButton(card) {
     const buttons = getHeaderButtons(card);
-    return buttons[1] || null;
+    if (buttons.length === 0) return null;
+
+    // --- 内容优先匹配（最可靠）---
+
+    // 1. 含 "anlas" 文字 → 一定是提取/动作按钮。
+    for (const btn of buttons) {
+      if (/anlas/i.test(textOf(btn))) return btn;
+    }
+
+    // 2. 纯数字文字（Anlas 费用）。
+    for (const btn of buttons) {
+      if (/^\d+$/.test(textOf(btn).trim())) return btn;
+    }
+
+    // 3. 含 SVG 的按钮中，跳过第一个（通常是 trash/删除），取第二个（动作按钮）。
+    const svgButtons = buttons.filter((b) => b.querySelector('svg'));
+    if (svgButtons.length >= 2) return svgButtons[1];
+    // 如果只有一个含 SVG 的按钮，它可能就是动作按钮（如删除按钮不含 SVG）。
+    if (svgButtons.length === 1) return svgButtons[0];
+
+    // --- 位置兜底 ---
+    if (buttons[1]) return buttons[1];
+
+    return buttons[0] || null;
   }
 
   function getActionMode(card) {
@@ -699,10 +743,17 @@
     await focusCard(card, list);
 
     if (aggressive) {
-      // 提取动作允许更激进的双重触发，规避偶发”看得到按钮但点击不生效”。
-      fireRealClick(btn);
-      await sleep(40);
-      clickElementAtCenter(btn);
+      // 激进模式：先尝试中心点击（绕过层叠遮挡），若 elementFromPoint
+      // 未命中按钮自身或其子元素，则回退到直接 fireRealClick。
+      const rect = btn.getBoundingClientRect();
+      const cx = rect.left + rect.width / 2;
+      const cy = rect.top + rect.height / 2;
+      const topEl = document.elementFromPoint(cx, cy);
+      if (topEl && btn.contains(topEl)) {
+        fireRealClick(topEl);
+      } else {
+        fireRealClick(btn);
+      }
       return;
     }
 
@@ -808,27 +859,55 @@
       return;
     }
 
+    // 点击提取的总次数上限（包括 stale 重试）。
+    const maxClicks = CONFIG.extractRetries * 3;
+    let clicks = 0;
+
     for (let attempt = 1; attempt <= CONFIG.extractRetries; attempt++) {
-      log(`卡片 ${id} 开始提取 ${targetText}（第 ${attempt} 次）`);
+      clicks++;
+      log(`卡片 ${id} 开始提取 ${targetText}（第 ${attempt} 次, click#${clicks}）`);
       await clickCardAction(id, list, { aggressive: CONFIG.aggressiveExtractClick });
 
       try {
         let diagTimer = 0;
+        const clickTime = Date.now();
+        const STALE_EXTRACT_MS = 15000; // 15 秒内仍是 extract → 点击未生效
+        let retriedStale = false;
+
         await waitForCardState(
           id,
           list,
           (c) => {
-            const ready = isDownloadReady(c);
-            // 每 ~5 秒输出一次诊断日志，便于排查卡住原因。
+            const mode = getActionMode(c);
+            if (mode === 'download') return true;
+
             diagTimer += 1;
-            if (!ready && diagTimer % 20 === 0) {
+
+            // Stale guard：点击后 15 秒仍为 extract 模式 → 点击未生效，立即重新点击。
+            if (
+              !retriedStale &&
+              mode === 'extract' &&
+              Date.now() - clickTime > STALE_EXTRACT_MS &&
+              clicks < maxClicks
+            ) {
+              retriedStale = true;
+              clicks++;
+              log(`[诊断] ${id} 点击后 15 秒仍为 extract 模式，重新点击（click#${clicks}）`);
+              // 异步重点击——不阻塞 predicate，下一轮 poll 会看到新状态。
+              clickCardAction(id, list, { aggressive: CONFIG.aggressiveExtractClick });
+            }
+
+            // 每 ~5 秒输出一次诊断日志。
+            if (diagTimer % 20 === 0) {
+              const allBtns = getHeaderButtons(c);
               const btn = getActionButton(c);
               const btnTxt = textOf(btn);
-              const mode = getActionMode(c);
               const hasSvg = btn?.querySelector('svg') !== null;
-              log(`[诊断] ${id} 等待中：mode=${mode}, btnText="${btnTxt}", hasSvg=${hasSvg}`);
+              const pending = isPending(c);
+              const btnSummary = allBtns.map((b, i) => `[${i}]"${textOf(b)}"`).join(', ');
+              log(`[诊断] ${id} 等待中：mode=${mode}, btnText="${btnTxt}", hasSvg=${hasSvg}, pending=${pending}, buttons(${allBtns.length}): ${btnSummary || '(无)'}`);
             }
-            return ready;
+            return false;
           },
           CONFIG.extractTimeoutMs,
           `卡片 ${id} 等待提取完成超时`
