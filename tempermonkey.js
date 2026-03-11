@@ -553,6 +553,8 @@
       await forceCommitTarget(id, probe, target, list);
       card = await forceCommitTarget(id, target, probe, list);
 
+      // 这里必须保持严格：若改值后始终直接可下载，则无法证明下载的是“当前目标值”新结果。
+      // 继续下载会出现“文件名前缀是新值，但内容仍是旧值”的错配。
       if (isDownloadReady(card)) {
         throw new Error(`卡片 ${id} 改成 ${targetText} 后始终直接可下载，无法确认是否为新提取结果，已阻止下载`);
       }
