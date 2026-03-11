@@ -26,8 +26,14 @@
     extractRetries: 2,
     modeSettleTimeoutMs: 1800,
     // 若改值后始终直接可下载，说明前端可能仍复用旧缓存；开启后会阻止该次下载，避免“文件名是目标值、内容却是旧值”。
-    strictCacheGuard: true,
+    strictCacheGuard: false,
     continueOnError: true,
+    // 直接设值模式：不做探针抖值/绕过值，只提交目标值。
+    directSetOnly: true,
+    // 提取按钮默认单击，避免双触发导致重复提取。
+    aggressiveExtractClick: false,
+    // 用户要求：不执行滚动扫描，只处理当前已挂载(可见)卡片。
+    noScrollTraversal: true,
   };
 
   let running = false;
@@ -45,7 +51,7 @@
         try {
           if (pendingDownloadPrefix && this.hasAttribute('download')) {
             const oldName = this.getAttribute('download') || '';
-            const prefix = String(pendingDownloadPrefix).replace(/[^\d.]/g, '');
+            const prefix = String(pendingDownloadPrefix).replace(/[^a-zA-Z0-9._-]/g, '');
             if (oldName && prefix && !oldName.startsWith(prefix + '_')) {
               this.setAttribute('download', `${prefix}_${oldName}`);
             }
@@ -316,6 +322,11 @@
   }
 
   async function harvestAllCardIds() {
+    if (CONFIG.noScrollTraversal) {
+      const ids = Array.from(getVisibleCardMap().keys());
+      return { ids, list: null };
+    }
+
     const list = await findVibeListContainer();
     const seen = new Set();
 
@@ -350,7 +361,14 @@
     const tryVisible = () => getVisibleCardMap().get(id) || null;
 
     let card = tryVisible();
-    if (card) return waitCardBindingStable(id, list, card);
+    if (card) {
+      if (CONFIG.noScrollTraversal || !list) return card;
+      return waitCardBindingStable(id, list, card);
+    }
+
+    if (CONFIG.noScrollTraversal || !list) {
+      throw new Error(`当前视图找不到卡片 ${id}（noScrollTraversal=true）`);
+    }
 
     const originalTop = list.scrollTop;
     list.scrollTop = 0;
@@ -557,6 +575,19 @@
   async function forceCommitTarget(id, target, oldValue, list) {
     const targetText = formatValue(target);
 
+    if (CONFIG.directSetOnly) {
+      const card = await ensureCardVisible(id, list);
+      await focusCard(card, list);
+      await applyInfoValue(card, targetText);
+      await waitValueStable(id, target, list);
+      const committedCard = await ensureCardVisible(id, list);
+      const currentValue = getCurrentInfo(committedCard);
+      if (!approxEqual(currentValue, target)) {
+        throw new Error(`卡片 ${id} 直接设值后未稳定到 ${targetText}`);
+      }
+      return committedCard;
+    }
+
     for (let attempt = 1; attempt <= CONFIG.setCommitRetries; attempt++) {
       let card = await ensureCardVisible(id, list);
       await focusCard(card, list);
@@ -582,10 +613,8 @@
       const committed =
         approxEqual(currentValue, target) &&
         (
-          !changed ||      // 原来就等于目标值
+          !changed ||
           requiresExtraction(card) ||
-          // 某些卡片在目标值存在历史提取缓存时会直接回到可下载。
-          // 只要这次已经成功“抖值->目标值”并读到目标值，就视为网页已接受。
           isDownloadReady(card)
         );
 
@@ -642,16 +671,24 @@
     return ensureCardVisible(id, list);
   }
 
-  async function clickCardAction(id, list) {
+  async function clickCardAction(id, list, options = {}) {
+    const { aggressive = false } = options;
     const card = await ensureCardVisible(id, list);
     const btn = getActionButton(card);
     if (!btn) throw new Error(`卡片 ${id} 找不到主动作按钮`);
 
     await focusCard(card, list);
-    // 先点按钮本体，再点按钮中心覆盖层，规避 0.01 场景下偶发“看得到按钮但点击不生效”。
-    fireRealClick(btn);
-    await sleep(40);
-    clickElementAtCenter(btn);
+
+    if (aggressive) {
+      // 提取动作允许更激进的双重触发，规避偶发“看得到按钮但点击不生效”。
+      fireRealClick(btn);
+      await sleep(40);
+      clickElementAtCenter(btn);
+      return;
+    }
+
+    // 下载动作只触发一次，避免重复导出同名文件。
+    btn.click?.();
   }
 
   async function extractIfNeeded(id, target, oldValue, list) {
@@ -697,7 +734,7 @@
 
           if (requiresExtraction(card)) {
             log(`卡片 ${id} 在绕过值 ${formatValue(bypass)} 进入待提取，执行强制提取`);
-            await clickCardAction(id, list);
+            await clickCardAction(id, list, { aggressive: CONFIG.aggressiveExtractClick });
             await waitForCardState(
               id,
               list,
@@ -746,7 +783,7 @@
 
     for (let attempt = 1; attempt <= CONFIG.extractRetries; attempt++) {
       log(`卡片 ${id} 开始提取 ${targetText}（第 ${attempt} 次）`);
-      await clickCardAction(id, list);
+      await clickCardAction(id, list, { aggressive: CONFIG.aggressiveExtractClick });
 
       try {
         await waitForCardState(
@@ -779,7 +816,7 @@
       throw new Error(`卡片 ${id} 当前不是可下载状态`);
     }
 
-    pendingDownloadPrefix = prefix;
+    pendingDownloadPrefix = `${prefix}_${id}`;
     try {
       await clickCardAction(id, list);
       await sleep(CONFIG.afterActionMs);
@@ -847,7 +884,8 @@
         throw new Error('没有扫描到任何 Vibe 卡片');
       }
 
-      log(`扫描到 ${ids.length} 张卡片：${ids.join(', ')}`);
+      const scope = CONFIG.noScrollTraversal ? '（仅当前可见）' : '';
+      log(`扫描到 ${ids.length} 张卡片${scope}：${ids.join(', ')}`);
 
       for (const value of values) {
         const targetText = formatValue(value);
@@ -893,7 +931,8 @@
   async function scanCards() {
     try {
       const { ids } = await harvestAllCardIds();
-      log(`扫描到 ${ids.length} 张卡片：${ids.join(', ')}`);
+      const scope = CONFIG.noScrollTraversal ? '（仅当前可见）' : '';
+      log(`扫描到 ${ids.length} 张卡片${scope}：${ids.join(', ')}`);
     } catch (err) {
       console.error(err);
       log(`扫描失败：${err.message}`);
@@ -930,7 +969,9 @@
     });
 
     const desc = makeEl('div', {
-      textContent: '逐卡片滚动、逐卡片强制提交新值。只有确认网页真的接受了新值，才会继续提取和下载。'
+      textContent: CONFIG.noScrollTraversal
+        ? '仅处理当前可见卡片；直接提交新值并校验，再提取与下载。'
+        : '逐卡片滚动、逐卡片强制提交新值。只有确认网页真的接受了新值，才会继续提取和下载。'
     }, {
       marginBottom: '10px',
       opacity: '0.9'
