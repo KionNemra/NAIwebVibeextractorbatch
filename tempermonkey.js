@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Vibe Batch Commit-Strict
 // @namespace    local.nai.vibe.batch.commitstrict
-// @version      1.0.3
+// @version      1.0.4
 // @description  Strict per-card vibe extraction/downloading with commit verification for long virtualized lists
 // @match        https://novelai.net/*
 // @grant        none
@@ -382,7 +382,15 @@
 
     while (Date.now() - start < timeoutMs) {
       if (stopRequested) throw new Error('已手动停止');
-      const card = await ensureCardVisible(id, list);
+      let card;
+      try {
+        card = await ensureCardVisible(id, list);
+      } catch (_err) {
+        // Card may briefly disappear during React remount; keep polling
+        // instead of propagating the error immediately.
+        await sleep(CONFIG.pollMs);
+        continue;
+      }
       if (predicate(card)) return card;
       await sleep(CONFIG.pollMs);
     }
@@ -450,6 +458,10 @@
     if (!btn) return 'unknown';
 
     const txt = textOf(btn);
+
+    // During React remount the button text may be empty or only whitespace;
+    // treat this as unknown rather than download to avoid false positives.
+    if (!txt) return 'unknown';
 
     if (/anlas/i.test(txt)) return 'extract';
     if (/\d/.test(txt) && txt.length <= 12) return 'extract';
@@ -597,7 +609,14 @@
     let stableCount = 0;
 
     while (Date.now() - start < timeoutMs) {
-      const card = await ensureCardVisible(id, list);
+      let card;
+      try {
+        card = await ensureCardVisible(id, list);
+      } catch (_err) {
+        // Card may briefly disappear during React remount; keep polling.
+        await sleep(CONFIG.pollMs);
+        continue;
+      }
       const valueNow = getCurrentInfo(card);
       const mode = getActionMode(card);
 
@@ -640,7 +659,7 @@
     let card = await ensureCardVisible(id, list);
     const changed = hasMeaningfulChange(oldValue, target);
 
-    if (!changed && isDownloadReady(card)) {
+    if (!changed && isDownloadReady(card) && !CONFIG.strictCacheGuard) {
       log(`卡片 ${id} 的 ${targetText} 已可下载`);
       return;
     }
@@ -649,7 +668,10 @@
       card = await waitForModeSettleAfterCommit(id, target, list);
     }
 
-    if (changed && isDownloadReady(card)) {
+    // When strictCacheGuard is on, a !changed card that is already
+    // download-ready must also go through the cache-bypass verification,
+    // because the existing download may reflect stale content.
+    if ((changed || CONFIG.strictCacheGuard) && isDownloadReady(card)) {
       log(`卡片 ${id} 的 ${targetText} 变更后直接可下载，执行二次改值校验以避免下载旧缓存`);
 
       const probe = pickProbeValue(target, target <= 0.05 ? 0.20 : 0.08);
@@ -711,9 +733,15 @@
       }
     }
 
-    // 改值后必须是 pending
-    if (changed && !requiresExtraction(card)) {
-      throw new Error(`卡片 ${id} 改成 ${targetText} 后未进入待提取状态`);
+    // 改值后必须是 pending（!changed 只因 strictCacheGuard 到达此处时，
+    // 卡片可能仍是 download-ready，此时无需提取——缓存校验已在上方完成）。
+    if (!requiresExtraction(card)) {
+      if (changed) {
+        throw new Error(`卡片 ${id} 改成 ${targetText} 后未进入待提取状态`);
+      }
+      // !changed + strictCacheGuard path: card passed the cache-bypass block
+      // above and is still download-ready — nothing more to extract.
+      return;
     }
 
     for (let attempt = 1; attempt <= CONFIG.extractRetries; attempt++) {
