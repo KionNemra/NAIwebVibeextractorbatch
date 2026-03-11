@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Vibe Batch Commit-Strict
 // @namespace    local.nai.vibe.batch.commitstrict
-// @version      1.0.7
+// @version      1.0.8
 // @description  Strict per-card vibe extraction/downloading with commit verification for long virtualized lists
 // @match        https://novelai.net/*
 // @grant        none
@@ -182,12 +182,13 @@
   function fireRealClick(el) {
     if (!el) return;
     el.focus?.();
-    el.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
+    el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
     el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
     el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    // 单次 click 即可触发 React 事件委托（React 在 root 监听原生 click）。
+    // 注意：不再追加 el.click()，因为会导致 React handler 双重触发，
+    // 从而引起提取按钮连按两次、下载双重触发等严重问题。
     el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-    // 某些 React/MUI 按钮只在原生 click 路径上触发处理器，补打一遍。
-    el.click?.();
   }
 
   function clickElementAtCenter(el) {
@@ -475,10 +476,24 @@
     return Array.from(header.querySelectorAll('button')).filter(isVisible);
   }
 
-  // header buttons usually [trash, action, check]
+  // header buttons usually [trash, action, check].
+  // 但按钮数量/顺序在提取进行中可能变化，因此加内容兜底。
   function getActionButton(card) {
     const buttons = getHeaderButtons(card);
-    return buttons[1] || null;
+    if (buttons.length === 0) return null;
+
+    // 优先：索引 [1]（最常见布局）。
+    if (buttons[1]) return buttons[1];
+
+    // 兜底：按钮数不足时，在所有可见按钮中找含 Anlas 文字或 SVG 图标的。
+    for (const btn of buttons) {
+      const txt = textOf(btn);
+      if (/anlas/i.test(txt)) return btn;
+      if (/^\d+$/.test(txt.trim())) return btn;
+      if (btn.querySelector('svg')) return btn;
+    }
+
+    return null;
   }
 
   function getActionMode(card) {
@@ -699,9 +714,9 @@
     await focusCard(card, list);
 
     if (aggressive) {
-      // 提取动作允许更激进的双重触发，规避偶发”看得到按钮但点击不生效”。
-      fireRealClick(btn);
-      await sleep(40);
+      // 激进模式：先尝试按钮中心点击（绕过层叠遮挡），若失败再 fireRealClick。
+      // 两步之间 40ms 间隔，但只触发一次有效 click（clickElementAtCenter
+      // 可能命中非按钮元素时 fireRealClick 兜底）。
       clickElementAtCenter(btn);
       return;
     }
@@ -822,11 +837,14 @@
             // 每 ~5 秒输出一次诊断日志，便于排查卡住原因。
             diagTimer += 1;
             if (!ready && diagTimer % 20 === 0) {
+              const allBtns = getHeaderButtons(c);
               const btn = getActionButton(c);
               const btnTxt = textOf(btn);
               const mode = getActionMode(c);
               const hasSvg = btn?.querySelector('svg') !== null;
-              log(`[诊断] ${id} 等待中：mode=${mode}, btnText="${btnTxt}", hasSvg=${hasSvg}`);
+              const pending = isPending(c);
+              const btnSummary = allBtns.map((b, i) => `[${i}]"${textOf(b)}"`).join(', ');
+              log(`[诊断] ${id} 等待中：mode=${mode}, btnText="${btnTxt}", hasSvg=${hasSvg}, pending=${pending}, buttons(${allBtns.length}): ${btnSummary || '(无)'}`);
             }
             return ready;
           },
