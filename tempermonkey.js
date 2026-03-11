@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Vibe Batch Commit-Strict
 // @namespace    local.nai.vibe.batch.commitstrict
-// @version      1.0.0
+// @version      1.0.1
 // @description  Strict per-card vibe extraction/downloading with commit verification for long virtualized lists
 // @match        https://novelai.net/*
 // @grant        none
@@ -164,10 +164,23 @@
 
   function fireRealClick(el) {
     if (!el) return;
+    el.focus?.();
     el.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
     el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
     el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
     el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    // 某些 React/MUI 按钮只在原生 click 路径上触发处理器，补打一遍。
+    el.click?.();
+  }
+
+  function clickElementAtCenter(el) {
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const x = rect.left + rect.width / 2;
+    const y = rect.top + rect.height / 2;
+    const topEl = document.elementFromPoint(x, y);
+    if (!topEl) return;
+    fireRealClick(topEl);
   }
 
   async function waitUntil(fn, timeoutMs, intervalMs = CONFIG.pollMs) {
@@ -615,7 +628,10 @@
     if (!btn) throw new Error(`卡片 ${id} 找不到主动作按钮`);
 
     await focusCard(card, list);
+    // 先点按钮本体，再点按钮中心覆盖层，规避 0.01 场景下偶发“看得到按钮但点击不生效”。
     fireRealClick(btn);
+    await sleep(40);
+    clickElementAtCenter(btn);
   }
 
   async function extractIfNeeded(id, target, oldValue, list) {
