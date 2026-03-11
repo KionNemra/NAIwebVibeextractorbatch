@@ -364,6 +364,12 @@
     return hasVisibleText(card, 'Encoding required');
   }
 
+  function requiresExtraction(card) {
+    // 有些界面文案或语言环境下不会出现 "Encoding required"，
+    // 但主按钮会切回提取模式（显示 Anlas 价格）。
+    return isPending(card) || getActionMode(card) === 'extract';
+  }
+
   function getHeaderButtons(card) {
     const header = card?.firstElementChild;
     if (!header) return [];
@@ -502,7 +508,7 @@
         approxEqual(currentValue, target) &&
         (
           !changed ||      // 原来就等于目标值
-          isPending(card) // 改值后必须进入待提取，避免误用旧缓存结果
+          requiresExtraction(card) // 改值后必须进入待提取/提取模式，避免误用旧缓存结果
         );
 
       if (committed) {
@@ -542,7 +548,7 @@
     }
 
     // 改值后必须是 pending
-    if (changed && !isPending(card)) {
+    if (changed && !requiresExtraction(card)) {
       throw new Error(`卡片 ${id} 改成 ${targetText} 后未进入待提取状态`);
     }
 
