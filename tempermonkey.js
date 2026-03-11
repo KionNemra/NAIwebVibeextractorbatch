@@ -508,15 +508,19 @@
   async function extractIfNeeded(id, target, oldValue, list) {
     const targetText = formatValue(target);
     let card = await ensureCardVisible(id, list);
+    const changed = !approxEqual(oldValue, target);
 
-    if (isDownloadReady(card)) {
+    if (!changed && isDownloadReady(card)) {
       log(`卡片 ${id} 的 ${targetText} 已可下载`);
       return;
     }
 
+    if (changed && isDownloadReady(card)) {
+      throw new Error(`卡片 ${id} 改成 ${targetText} 后仍直接显示可下载，疑似仍是旧提取结果，已阻止错误下载`);
+    }
+
     // 改值后如果既没 pending 也没 download，就视为没提交成功，不继续下载错文件
-    const changed = !approxEqual(oldValue, target);
-    if (changed && !isPending(card) && !isDownloadReady(card)) {
+    if (changed && !isPending(card)) {
       throw new Error(`卡片 ${id} 改成 ${targetText} 后未进入待提取/可下载状态`);
     }
 
