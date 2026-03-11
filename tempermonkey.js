@@ -211,16 +211,32 @@
   }
 
   function findScrollParent(startEl) {
+    const candidates = [];
+
     let el = startEl;
     while (el && el !== document.body) {
       const style = getComputedStyle(el);
       const overflowY = style.overflowY;
-      if ((overflowY === 'auto' || overflowY === 'scroll') && el.scrollHeight > el.clientHeight + 40) {
-        return el;
+      const canScroll = (overflowY === 'auto' || overflowY === 'scroll') && el.scrollHeight > el.clientHeight + 40;
+      if (canScroll) {
+        candidates.push(el);
       }
       el = el.parentElement;
     }
-    return document.scrollingElement || document.documentElement;
+
+    const docScroller = document.scrollingElement || document.documentElement;
+    if (docScroller) {
+      candidates.push(docScroller);
+    }
+
+    if (!candidates.length) {
+      return docScroller || document.documentElement;
+    }
+
+    // 有些页面会嵌套多个 overflow 容器；选择“可滚动距离最大”的那个，
+    // 通常才是虚拟列表真正的滚动容器。
+    candidates.sort((a, b) => (b.scrollHeight - b.clientHeight) - (a.scrollHeight - a.clientHeight));
+    return candidates[0];
   }
 
   async function findVibeListContainer() {
