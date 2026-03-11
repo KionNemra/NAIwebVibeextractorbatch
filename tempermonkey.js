@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Vibe Batch Commit-Strict
 // @namespace    local.nai.vibe.batch.commitstrict
-// @version      1.0.1
+// @version      1.0.3
 // @description  Strict per-card vibe extraction/downloading with commit verification for long virtualized lists
 // @match        https://novelai.net/*
 // @grant        none
@@ -25,7 +25,8 @@
     setCommitRetries: 4,
     extractRetries: 2,
     modeSettleTimeoutMs: 1800,
-    strictCacheGuard: false,
+    // 若改值后始终直接可下载，说明前端可能仍复用旧缓存；开启后会阻止该次下载，避免“文件名是目标值、内容却是旧值”。
+    strictCacheGuard: true,
     continueOnError: true,
   };
 
@@ -656,30 +657,52 @@
       card = await forceCommitTarget(id, target, probe, list);
       card = await waitForModeSettleAfterCommit(id, target, list);
 
-      // 仍直接可下载时，先执行一次“中间值强制提取”来打破缓存路径（尤其针对 0.01）。
+      // 若仍直接可下载，尝试多组绕过值，直到至少出现一次“待提取”并完成提取。
       if (isDownloadReady(card)) {
-        const bypass = pickBypassValue(target);
-        log(`卡片 ${id} 的 ${targetText} 仍直接可下载，执行缓存绕过：${formatValue(bypass)} -> ${targetText}`);
+        const bypassCandidates = [
+          pickBypassValue(target),
+          clamp01(target <= 0.50 ? 0.88 : 0.12),
+          clamp01(target <= 0.50 ? 0.66 : 0.34),
+        ];
 
-        card = await forceCommitTarget(id, bypass, target, list);
-        if (requiresExtraction(card)) {
-          await clickCardAction(id, list);
-          await waitForCardState(
-            id,
-            list,
-            (c) => isDownloadReady(c),
-            CONFIG.extractTimeoutMs,
-            `卡片 ${id} 缓存绕过提取超时`
-          );
-          await sleep(CONFIG.afterActionMs);
+        let forcedFresh = false;
+        for (const bypass of bypassCandidates) {
+          if (isSameCommittedValue(bypass, target)) continue;
+          log(`卡片 ${id} 的 ${targetText} 仍直接可下载，执行缓存绕过：${formatValue(bypass)} -> ${targetText}`);
+
+          card = await forceCommitTarget(id, bypass, target, list);
+          card = await waitForModeSettleAfterCommit(id, bypass, list);
+
+          if (requiresExtraction(card)) {
+            log(`卡片 ${id} 在绕过值 ${formatValue(bypass)} 进入待提取，执行强制提取`);
+            await clickCardAction(id, list);
+            await waitForCardState(
+              id,
+              list,
+              (c) => isDownloadReady(c),
+              CONFIG.extractTimeoutMs,
+              `卡片 ${id} 绕过值 ${formatValue(bypass)} 提取超时`
+            );
+            await sleep(CONFIG.afterActionMs);
+            forcedFresh = true;
+          } else {
+            log(`卡片 ${id} 在绕过值 ${formatValue(bypass)} 仍直接可下载，继续尝试下一组绕过值`);
+          }
+
+          card = await forceCommitTarget(id, target, bypass, list);
+          card = await waitForModeSettleAfterCommit(id, target, list);
+
+          if (requiresExtraction(card)) {
+            break;
+          }
         }
-
-        card = await forceCommitTarget(id, target, bypass, list);
-        card = await waitForModeSettleAfterCommit(id, target, list);
 
         if (isDownloadReady(card)) {
           if (CONFIG.strictCacheGuard) {
-            throw new Error(`卡片 ${id} 改成 ${targetText} 后仍直接可下载，缓存绕过后仍无法确认新结果，已阻止下载`);
+            const hint = forcedFresh
+              ? '已在绕过值完成提取，但回到目标值后仍直接可下载'
+              : '所有绕过值均未进入待提取状态';
+            throw new Error(`卡片 ${id} 改成 ${targetText} 后仍直接可下载（${hint}），已阻止下载`);
           }
 
           log(`卡片 ${id} 的 ${targetText} 缓存绕过后仍可直接下载，按已提交值继续（strictCacheGuard=false）`);
