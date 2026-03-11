@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Vibe Batch Commit-Strict
 // @namespace    local.nai.vibe.batch.commitstrict
-// @version      1.0.4
+// @version      1.0.5
 // @description  Strict per-card vibe extraction/downloading with commit verification for long virtualized lists
 // @match        https://novelai.net/*
 // @grant        none
@@ -477,9 +477,14 @@
 
     const txt = textOf(btn);
 
+    // 按钮含有下载图标（SVG path 中的 download 箭头）时直接判定为 download。
+    const hasSvg = btn.querySelector('svg') !== null;
+
     // During React remount the button text may be empty or only whitespace;
-    // treat this as unknown rather than download to avoid false positives.
-    if (!txt) return 'unknown';
+    // 若有 SVG 图标但无文字，多半是下载按钮（图标按钮）。
+    if (!txt) {
+      return hasSvg ? 'download' : 'unknown';
+    }
 
     if (/anlas/i.test(txt)) return 'extract';
     if (/\d/.test(txt) && txt.length <= 12) return 'extract';
@@ -488,7 +493,19 @@
   }
 
   function isDownloadReady(card) {
-    return getActionMode(card) === 'download';
+    const mode = getActionMode(card);
+    if (mode === 'download') return true;
+
+    // 兜底：如果按钮含 SVG 图标且不含 "Encoding required" 提示，
+    // 视为下载就绪（有些语言环境下按钮文本可能含数字但实为下载）。
+    const btn = getActionButton(card);
+    if (btn && btn.querySelector('svg') && !isPending(card)) {
+      const txt = textOf(btn);
+      // 排除明确的 anlas 提取按钮
+      if (!/anlas/i.test(txt)) return true;
+    }
+
+    return false;
   }
 
   function getCardFocusTarget(card) {
@@ -687,8 +704,9 @@
       return;
     }
 
-    // 下载动作只触发一次，避免重复导出同名文件。
-    btn.click?.();
+    // 非激进模式：仍使用完整事件分发（fireRealClick），保证 React 合成事件能响应。
+    // 相比 aggressive 模式，此处只触发一次，避免重复导出同名文件。
+    fireRealClick(btn);
   }
 
   async function extractIfNeeded(id, target, oldValue, list) {
