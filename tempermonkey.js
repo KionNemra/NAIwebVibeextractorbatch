@@ -25,6 +25,7 @@
     setCommitRetries: 4,
     extractRetries: 2,
     modeSettleTimeoutMs: 1800,
+    strictCacheGuard: false,
     continueOnError: true,
   };
 
@@ -661,7 +662,12 @@
         card = await waitForModeSettleAfterCommit(id, target, list);
 
         if (isDownloadReady(card)) {
-          throw new Error(`卡片 ${id} 改成 ${targetText} 后仍直接可下载，缓存绕过后仍无法确认新结果，已阻止下载`);
+          if (CONFIG.strictCacheGuard) {
+            throw new Error(`卡片 ${id} 改成 ${targetText} 后仍直接可下载，缓存绕过后仍无法确认新结果，已阻止下载`);
+          }
+
+          log(`卡片 ${id} 的 ${targetText} 缓存绕过后仍可直接下载，按已提交值继续（strictCacheGuard=false）`);
+          return;
         }
       }
     }
