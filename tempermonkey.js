@@ -1128,11 +1128,44 @@
       lineHeight: '1.45'
     });
 
-    const title = makeEl('div', { textContent: 'NAI Vibe Batch Commit-Strict' }, {
-      fontSize: '15px',
-      fontWeight: '700',
+    const titleBar = makeEl('div', {}, {
+      display: 'flex',
+      justifyContent: 'space-between',
+      alignItems: 'center',
       marginBottom: '8px'
     });
+
+    const title = makeEl('div', { textContent: 'NAI Vibe Batch Commit-Strict' }, {
+      fontSize: '15px',
+      fontWeight: '700'
+    });
+
+    const minimizeBtn = makeEl('button', { textContent: '\u2015' }, {
+      width: '26px',
+      height: '26px',
+      padding: '0',
+      border: 'none',
+      borderRadius: '6px',
+      background: 'rgba(255,255,255,0.12)',
+      color: '#fff',
+      fontSize: '14px',
+      lineHeight: '26px',
+      textAlign: 'center',
+      cursor: 'pointer',
+      flexShrink: '0'
+    });
+
+    let minimized = false;
+    const bodyEls = [];        // [{el, origDisplay}]
+
+    minimizeBtn.addEventListener('click', () => {
+      minimized = !minimized;
+      minimizeBtn.textContent = minimized ? '\u25A1' : '\u2015';
+      bodyEls.forEach(({ el, origDisplay }) =>
+        el.style.display = minimized ? 'none' : origDisplay);
+    });
+
+    titleBar.append(title, minimizeBtn);
 
     const desc = makeEl('div', {
       textContent: CONFIG.noScrollTraversal
@@ -1206,7 +1239,9 @@
     scan.addEventListener('click', scanCards);
 
     row.append(start, stop, scan);
-    root.append(title, desc, label, values, row, status);
+    [desc, label, values, row, status].forEach(el =>
+      bodyEls.push({ el, origDisplay: el.style.display || '' }));
+    root.append(titleBar, desc, label, values, row, status);
     document.body.appendChild(root);
 
     panel = { root, values, start, stop, scan, status };
