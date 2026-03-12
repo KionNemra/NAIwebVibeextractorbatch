@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Vibe Batch Commit-Strict
 // @namespace    local.nai.vibe.batch.commitstrict
-// @version      1.0.10
+// @version      1.0.11
 // @description  Strict per-card vibe extraction/downloading with commit verification for long virtualized lists
 // @match        https://novelai.net/*
 // @grant        none
@@ -186,10 +186,12 @@
     el.dispatchEvent(new Ptr('pointerdown', { bubbles: true }));
     el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
     el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-    // 单次 click 即可触发 React 事件委托（React 在 root 监听原生 click）。
-    // 注意：不再追加 el.click()，因为会导致 React handler 双重触发，
-    // 从而引起提取按钮连按两次、下载双重触发等严重问题。
-    el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    // 必须使用 el.click()（而非 dispatchEvent(click)），因为：
+    // 1. el.click() 产生 trusted event → 浏览器允许后续下载（user activation）
+    // 2. dispatchEvent(click) 产生 untrusted event → 浏览器阻止下载
+    // 3. React 事件委托对两者都能响应，但只有 trusted 才能触发下载
+    // 不再同时使用 dispatchEvent(click) + el.click()，避免双重触发。
+    el.click();
   }
 
   function clickElementAtCenter(el) {
@@ -525,29 +527,43 @@
     return buttons[0] || null;
   }
 
+  // 获取按钮的所有可识别文本（textContent、aria-label、title）。
+  function btnLabel(btn) {
+    if (!btn) return '';
+    return [
+      textOf(btn),
+      btn.getAttribute('aria-label') || '',
+      btn.getAttribute('title') || '',
+    ].join(' ').trim();
+  }
+
   function getActionMode(card) {
     const btn = getActionButton(card);
     if (!btn) return 'unknown';
 
     const txt = textOf(btn);
+    const label = btnLabel(btn);
     const hasSvg = btn.querySelector('svg') !== null;
+    const hasImg = btn.querySelector('img') !== null;
 
-    // React remount 时文本可能为空。
-    if (!txt) {
-      return hasSvg ? 'download' : 'unknown';
-    }
-
-    // 明确含 "anlas" → 提取按钮。
-    if (/anlas/i.test(txt)) return 'extract';
-
-    // 按钮含 SVG 图标 → 优先判定为下载（提取按钮通常只有文字/数字，无图标）。
-    if (hasSvg) return 'download';
+    // 明确含 "anlas"（文本或 aria-label）→ 提取按钮。
+    if (/anlas/i.test(label)) return 'extract';
 
     // 纯数字文本（如 "5"、"10"、"0"）→ Anlas 费用，视为提取。
-    // 注意：只匹配纯数字，不匹配含字母/混合文本（如 "Download"、"2.5MB"）。
-    if (/^\d+$/.test(txt.trim())) return 'extract';
+    if (txt && /^\d+$/.test(txt.trim())) return 'extract';
 
-    return 'download';
+    // 有图标（SVG 或 <img>）且不含 anlas → 下载按钮。
+    if (hasSvg || hasImg) return 'download';
+
+    // aria-label/title 含 download/save → 下载。
+    if (/download|save/i.test(label)) return 'download';
+
+    // 有文字但不匹配上述规则 → 视为下载（如 "Download"、"Save" 等）。
+    if (txt) return 'download';
+
+    // 无文字、无图标、无 label：按钮完全空。
+    // 不在此处冒险判定，留给调用方（waitForCardState）根据持续时间决定。
+    return 'unknown';
   }
 
   function isDownloadReady(card) {
@@ -872,7 +888,9 @@
         let diagTimer = 0;
         const clickTime = Date.now();
         const STALE_EXTRACT_MS = 15000; // 15 秒内仍是 extract → 点击未生效
+        const SUSTAINED_UNKNOWN_MS = 20000; // 持续 unknown 超过 20 秒 → 视为完成
         let retriedStale = false;
+        let unknownSince = 0; // 首次连续出现 unknown 的时间
 
         await waitForCardState(
           id,
@@ -882,12 +900,25 @@
             if (mode === 'download') return true;
 
             diagTimer += 1;
+            const now = Date.now();
+
+            // Sustained unknown guard：按钮存在但内容无法识别（如 CSS 图标），
+            // 且卡片不 pending → 持续 20 秒后视为提取已完成。
+            if (mode === 'unknown' && !isPending(c)) {
+              if (!unknownSince) unknownSince = now;
+              if (now - unknownSince > SUSTAINED_UNKNOWN_MS) {
+                log(`[诊断] ${id} 持续 unknown 状态 ${Math.round((now - unknownSince) / 1000)} 秒，视为已提取完成`);
+                return true;
+              }
+            } else {
+              unknownSince = 0;
+            }
 
             // Stale guard：点击后 15 秒仍为 extract 模式 → 点击未生效，立即重新点击。
             if (
               !retriedStale &&
               mode === 'extract' &&
-              Date.now() - clickTime > STALE_EXTRACT_MS &&
+              now - clickTime > STALE_EXTRACT_MS &&
               clicks < maxClicks
             ) {
               retriedStale = true;
@@ -904,8 +935,12 @@
               const btnTxt = textOf(btn);
               const hasSvg = btn?.querySelector('svg') !== null;
               const pending = isPending(c);
-              const btnSummary = allBtns.map((b, i) => `[${i}]"${textOf(b)}"`).join(', ');
-              log(`[诊断] ${id} 等待中：mode=${mode}, btnText="${btnTxt}", hasSvg=${hasSvg}, pending=${pending}, buttons(${allBtns.length}): ${btnSummary || '(无)'}`);
+              // 详细按钮内容：截取 innerHTML 前 120 字符，方便判断图标类型。
+              const btnDetail = allBtns.map((b, i) => {
+                const inner = (b.innerHTML || '').replace(/\s+/g, ' ').trim();
+                return `[${i}]"${textOf(b)}"(${inner.slice(0, 120)})`;
+              }).join(' | ');
+              log(`[诊断] ${id} 等待中：mode=${mode}, hasSvg=${hasSvg}, pending=${pending}, buttons(${allBtns.length}): ${btnDetail || '(无)'}`);
             }
             return false;
           },
