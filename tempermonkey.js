@@ -1162,6 +1162,7 @@
       minimized = !minimized;
       minimizeBtn.textContent = minimized ? '\u25A1' : '\u2015';
       title.style.display = minimized ? 'none' : '';
+      titleBar.style.marginBottom = minimized ? '0' : '8px';
       root.style.width = minimized ? 'auto' : '440px';
       root.style.padding = minimized ? '6px' : '14px';
       bodyEls.forEach(({ el, origDisplay }) =>
