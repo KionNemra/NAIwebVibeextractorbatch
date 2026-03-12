@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Vibe Batch Commit-Strict
 // @namespace    local.nai.vibe.batch.commitstrict
-// @version      1.0.12
+// @version      1.0.13
 // @description  Strict per-card vibe extraction/downloading with commit verification for long virtualized lists
 // @match        https://novelai.net/*
 // @grant        none
@@ -167,15 +167,25 @@
   }
 
   function setNativeValue(input, value) {
-    const desc = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+    const proto = Object.getPrototypeOf(input);
+    const desc =
+      Object.getOwnPropertyDescriptor(proto, 'value') ||
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
     if (desc?.set) {
       desc.set.call(input, String(value));
     } else {
       input.value = String(value);
     }
 
+    // React 用 _valueTracker 记住上一次"已知"值。如果不重置，
+    // React 对比后认为值没变，会静默忽略 input/change 事件，
+    // 导致 UI 不更新（按钮不从 download 切回 extract）。
+    const tracker = input._valueTracker;
+    if (tracker) {
+      tracker.setValue('__force_update__');
+    }
+
     input.dispatchEvent(new Event('input', { bubbles: true }));
-    input.dispatchEvent(new InputEvent('input', { bubbles: true, data: String(value) }));
     input.dispatchEvent(new Event('change', { bubbles: true }));
   }
 
