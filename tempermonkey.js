@@ -1156,12 +1156,13 @@
     });
 
     let minimized = false;
-    const bodyEls = [];
+    const bodyEls = [];        // [{el, origDisplay}]
 
     minimizeBtn.addEventListener('click', () => {
       minimized = !minimized;
       minimizeBtn.textContent = minimized ? '\u25A1' : '\u2015';
-      bodyEls.forEach(el => el.style.display = minimized ? 'none' : '');
+      bodyEls.forEach(({ el, origDisplay }) =>
+        el.style.display = minimized ? 'none' : origDisplay);
     });
 
     titleBar.append(title, minimizeBtn);
@@ -1238,7 +1239,8 @@
     scan.addEventListener('click', scanCards);
 
     row.append(start, stop, scan);
-    bodyEls.push(desc, label, values, row, status);
+    [desc, label, values, row, status].forEach(el =>
+      bodyEls.push({ el, origDisplay: el.style.display || '' }));
     root.append(titleBar, desc, label, values, row, status);
     document.body.appendChild(root);
 
