@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Vibe Batch Commit-Strict
 // @namespace    local.nai.vibe.batch.commitstrict
-// @version      1.0.11
+// @version      1.0.12
 // @description  Strict per-card vibe extraction/downloading with commit verification for long virtualized lists
 // @match        https://novelai.net/*
 // @grant        none
@@ -561,8 +561,10 @@
     // 有文字但不匹配上述规则 → 视为下载（如 "Download"、"Save" 等）。
     if (txt) return 'download';
 
-    // 无文字、无图标、无 label：按钮完全空。
-    // 不在此处冒险判定，留给调用方（waitForCardState）根据持续时间决定。
+    // 无文字但含子元素（NovelAI 用 CSS 背景图渲染的图标 div，如 12x12 的 styled-components div）。
+    // 提取按钮始终有文字（"N Anlas"），因此无文字 + 有子元素 = 下载图标按钮。
+    if (btn.children.length > 0) return 'download';
+
     return 'unknown';
   }
 
@@ -888,7 +890,7 @@
         let diagTimer = 0;
         const clickTime = Date.now();
         const STALE_EXTRACT_MS = 15000; // 15 秒内仍是 extract → 点击未生效
-        const SUSTAINED_UNKNOWN_MS = 20000; // 持续 unknown 超过 20 秒 → 视为完成
+        const SUSTAINED_UNKNOWN_MS = 10000; // 持续 unknown 超过 10 秒 → 视为完成
         let retriedStale = false;
         let unknownSince = 0; // 首次连续出现 unknown 的时间
 
